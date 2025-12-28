@@ -4,14 +4,18 @@
  * load cell weight measurement, and web server for remote control
  */
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <AccelStepper.h>
 #include <HX711.h>
 
 // WiFi Configuration
-const char* ssid = "Casa da Opera";
-const char* password = "naovoudizer";
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+// DEBUG: Set to true to skip WiFi (for testing in Wokwi)
+#define SKIP_WIFI false  // Set to true to disable WiFi completely
 
 // Pin Definitions
 #define STEP_PIN 2      // A4988 STEP pin
@@ -40,7 +44,7 @@ WebServer server(80);
 
 // Timing Variables
 unsigned long lastWeightDisplay = 0;
-const unsigned long weightDisplayInterval = 30000;  // 30 seconds
+const unsigned long weightDisplayInterval = 5000;  // 5 seconds for testing (change to 30000 for production)
 
 // Function Prototypes
 void setupWiFi();
@@ -52,54 +56,125 @@ void dispenseFood();
 float getWeight();
 
 void setup() {
+  // CRITICAL: Start Serial FIRST - exactly like the working example
   Serial.begin(115200);
-  delay(1000);
   
-  Serial.println("ESP32 Smart Feeder - Initializing...");
+  // CRITICAL: Print immediately - SIMPLE, like working example
+  Serial.println("Initializing WiFi...");
+  WiFi.mode(WIFI_STA);
+  Serial.println("Setup done!");
+  
+  // Now continue with Smart Feeder initialization
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("ESP32 Smart Feeder - Starting...");
+  Serial.println("========================================");
+  delay(200);
+  
+  // Now do WiFi setup (scan and connect)
+  Serial.println("Setting up WiFi connection...");
+  delay(100);
+  
+  #if SKIP_WIFI
+    Serial.println("WiFi SKIPPED (for testing)");
+  #else
+    setupWiFi();
+    Serial.print("WiFi status: ");
+    Serial.println(WiFi.status());
+  #endif
+  delay(100);
+  
+  // NOW initialize hardware (after WiFi/Serial is working)
+  Serial.println("Initializing hardware...");
+  delay(100);
   
   // Initialize Stepper Motor
+  Serial.println("  - Stepper motor...");
   pinMode(ENABLE_PIN, OUTPUT);
   digitalWrite(ENABLE_PIN, HIGH);  // Disable motor initially
   stepper.setMaxSpeed(MAX_SPEED);
   stepper.setAcceleration(ACCELERATION);
+  Serial.println("    ✓ Done");
+  delay(50);
   
   // Initialize IR Sensor
+  Serial.println("  - IR sensor...");
   pinMode(IR_SENSOR_PIN, INPUT);
+  int irInit = digitalRead(IR_SENSOR_PIN);
+  Serial.print("    ✓ Done (status: ");
+  Serial.print(irInit == LOW ? "OBSTRUCTION" : "CLEAR");
+  Serial.println(")");
+  delay(50);
   
   // Initialize Load Cell
+  Serial.println("  - Load cell (HX711)...");
   scale.begin(DT_PIN, SCK_PIN);
   scale.set_scale(calibration_factor);
-  scale.tare();  // Reset the scale to 0
+  delay(100);
+  if (scale.is_ready()) {
+    scale.tare();
+    Serial.println("    ✓ Done (HX711 ready)");
+  } else {
+    Serial.println("    ⚠ HX711 not detected (simulation mode)");
+    scale.tare();
+  }
+  delay(50);
   
-  // Connect to WiFi
-  setupWiFi();
-  
-  // Setup Web Server Routes
+  // Setup Web Server
+  Serial.println("Setting up web server...");
   server.on("/", handleRoot);
   server.on("/dispense", handleDispense);
   server.on("/weight", handleWeight);
   server.onNotFound(handleNotFound);
-  
   server.begin();
-  Serial.println("Web server started!");
-  Serial.print("Access the feeder at: http://");
-  Serial.println(WiFi.localIP());
+  Serial.println("  ✓ Web server started!");
   
-  Serial.println("Setup complete!");
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("🌐 WEB SERVER ACCESS");
+  Serial.println("========================================");
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("✅ WiFi CONNECTED!");
+    Serial.print("📍 Access your Smart Feeder at:");
+    Serial.println();
+    Serial.print("   👉 http://");
+    Serial.println(WiFi.localIP());
+    Serial.println();
+    Serial.println("   Open this URL in your browser to control the feeder");
+  } else {
+    Serial.println();
+    Serial.println("⚠️  WiFi not connected");
+    Serial.println("   Web server is running but may not be accessible");
+    Serial.println("   (This is normal in Wokwi simulation)");
+  }
+  
+  Serial.println("========================================");
+  Serial.println();
+  Serial.println("Setup complete! Entering main loop...");
+  Serial.println();
 }
 
 void loop() {
-  server.handleClient();
+  // Continuous output to verify loop is running (like the working example)
+  static unsigned long lastStatus = 0;
+  unsigned long now = millis();
   
-  // Display weight every 30 seconds
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastWeightDisplay >= weightDisplayInterval) {
+  // Print status every 5 seconds
+  if (now - lastStatus >= 5000) {
+    Serial.println("Status update:");
+    Serial.print("  Weight: ");
     float weight = getWeight();
-    Serial.print("Current weight: ");
-    Serial.print(weight);
-    Serial.println(" g");
-    lastWeightDisplay = currentMillis;
+    Serial.print(weight, 2);
+    Serial.print(" g | IR: ");
+    int irStatus = digitalRead(IR_SENSOR_PIN);
+    Serial.println(irStatus == LOW ? "OBSTRUCTION" : "CLEAR");
+    lastStatus = now;
   }
+  
+  // Handle web server
+  server.handleClient();
   
   // Run stepper motor if needed
   stepper.run();
@@ -108,31 +183,127 @@ void loop() {
 }
 
 void setupWiFi() {
-  Serial.print("Connecting to WiFi: ");
+  Serial.println("[DEBUG] ===== setupWiFi() STARTED =====");
+  Serial.print("[DEBUG] Target SSID: ");
   Serial.println(ssid);
+  Serial.print("[DEBUG] Password: ");
+  Serial.println(strlen(password) > 0 ? "***" : "(empty)");
+  Serial.flush();
+  delay(100);
   
+  // Step 1: Set WiFi mode
+  Serial.println("[DEBUG] Step 1: Setting WiFi mode to STA...");
+  Serial.flush();
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
+  delay(100);
+  Serial.println("[DEBUG] ✓ WiFi mode set to STA");
+  Serial.flush();
   
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
+  // Step 2: Scan for networks to check if target network exists
+  Serial.println("[DEBUG] Step 2: Scanning for available networks...");
+  Serial.flush();
+  delay(500);
   
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
-    Serial.println("WiFi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+  int n = WiFi.scanNetworks();
+  Serial.print("[DEBUG] Scan complete. Found ");
+  Serial.print(n);
+  Serial.println(" networks");
+  Serial.flush();
+  
+  bool networkFound = false;
+  if (n > 0) {
+    Serial.println("[DEBUG] Available networks:");
+    for (int i = 0; i < n; i++) {
+      Serial.print("[DEBUG]   ");
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(" dBm)");
+      
+      // Check if this is our target network
+      if (WiFi.SSID(i) == String(ssid)) {
+        Serial.print(" <-- TARGET FOUND!");
+        networkFound = true;
+      }
+      Serial.println();
+      Serial.flush();
+    }
   } else {
-    Serial.println();
-    Serial.println("WiFi connection failed!");
+    Serial.println("[DEBUG] ⚠ No networks found in scan");
+    Serial.flush();
   }
+  
+  // Step 3: Only connect if network was found
+  if (networkFound) {
+    Serial.println("[DEBUG] Step 3: Target network found! Attempting connection...");
+    Serial.flush();
+    delay(100);
+    
+    Serial.println("[DEBUG] Calling WiFi.begin()...");
+    Serial.flush();
+    WiFi.begin(ssid, password);
+    
+    Serial.println("[DEBUG] WiFi.begin() returned - waiting for connection...");
+    Serial.flush();
+    delay(500);
+    
+    // Wait for connection with timeout
+    int attempts = 0;
+    int maxAttempts = 15;  // 7.5 seconds max
+    Serial.print("[DEBUG] Connection status: ");
+    
+    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+      delay(500);
+      Serial.print(".");
+      Serial.flush();
+      attempts++;
+      
+      // Print attempt number every 3 attempts
+      if (attempts % 3 == 0) {
+        Serial.print("[");
+        Serial.print(attempts);
+        Serial.print("]");
+        Serial.flush();
+      }
+    }
+    
+    Serial.println();
+    Serial.print("[DEBUG] Final connection status: ");
+    int status = WiFi.status();
+    Serial.println(status);
+    Serial.flush();
+    delay(100);
+    
+    if (status == WL_CONNECTED) {
+      Serial.println("[DEBUG] ✓✓✓ WiFi CONNECTED SUCCESSFULLY! ✓✓✓");
+      Serial.print("[DEBUG] IP address: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("[DEBUG] Signal strength (RSSI): ");
+      Serial.print(WiFi.RSSI());
+      Serial.println(" dBm");
+    } else {
+      Serial.println("[DEBUG] ⚠ Connection attempt failed");
+      Serial.print("[DEBUG] Status code: ");
+      Serial.println(status);
+      Serial.println("[DEBUG]   (WL_IDLE_STATUS=0, WL_NO_SSID_AVAIL=1, WL_SCAN_COMPLETED=2)");
+      Serial.println("[DEBUG]   (WL_CONNECTED=3, WL_CONNECT_FAILED=4, WL_CONNECTION_LOST=5)");
+      Serial.println("[DEBUG]   (WL_DISCONNECTED=6)");
+    }
+  } else {
+    Serial.println("[DEBUG] Step 3: Target network NOT found in scan");
+    Serial.println("[DEBUG] ⚠ Skipping connection attempt");
+    Serial.println("[DEBUG]   Network may be out of range or hidden");
+    Serial.println("[DEBUG]   Continuing without WiFi connection");
+  }
+  
+  Serial.println("[DEBUG] ===== setupWiFi() COMPLETE =====");
+  Serial.flush();
 }
 
 void handleRoot() {
+  Serial.println("[DEBUG] handleRoot() called");
   float weight = getWeight();
   int irStatus = digitalRead(IR_SENSOR_PIN);
   String irStatusText = (irStatus == LOW) ? "OBSTRUCTION DETECTED" : "Clear";
@@ -170,7 +341,7 @@ void handleRoot() {
   html += "    document.querySelector('.weight').innerHTML = 'Current Weight: ' + data + ' g';";
   html += "  });";
   html += "}";
-  html += "setInterval(updateWeight, 30000);";  // Auto-refresh every 30 seconds
+  html += "setInterval(updateWeight, 30000);";
   html += "</script>";
   html += "</div></body></html>";
   
@@ -178,7 +349,7 @@ void handleRoot() {
 }
 
 void handleDispense() {
-  Serial.println("Dispense command received via web");
+  Serial.println("[DEBUG] Dispense command received via web");
   dispenseFood();
   
   float weight = getWeight();
@@ -196,47 +367,46 @@ void handleNotFound() {
 }
 
 void dispenseFood() {
-  // Check IR sensor for safety
-  // Most IR obstacle sensors output LOW when obstacle detected, HIGH when clear
+  Serial.println("[DEBUG] dispenseFood() called");
   int irValue = digitalRead(IR_SENSOR_PIN);
   
-  if (irValue == LOW) {  // LOW means obstacle detected
-    Serial.println("IR sensor detects obstruction - dispensing blocked!");
+  Serial.print("[DEBUG] IR Sensor status: ");
+  Serial.println(irValue == LOW ? "OBSTRUCTION DETECTED" : "CLEAR");
+  
+  if (irValue == LOW) {
+    Serial.println("[DEBUG] ❌ Dispensing BLOCKED - obstruction detected!");
     return;
   }
   
-  Serial.println("Dispensing food...");
+  Serial.println("[DEBUG] ✓ Starting food dispensing...");
+  Serial.print("[DEBUG] Steps to move: ");
+  Serial.println(DISPENSE_STEPS);
   
-  // Enable motor
   digitalWrite(ENABLE_PIN, LOW);
   delay(10);
   
-  // Move stepper motor
   stepper.move(DISPENSE_STEPS);
   
-  // Wait for movement to complete
+  Serial.println("[DEBUG] Motor running...");
   while (stepper.run()) {
     delay(1);
   }
   
-  // Disable motor to save power
   digitalWrite(ENABLE_PIN, HIGH);
   
-  Serial.println("Food dispensing complete!");
-  
-  // Wait for food to settle before next reading
+  Serial.println("[DEBUG] ✓ Food dispensing complete!");
   delay(1000);
+  Serial.println();
 }
 
 float getWeight() {
   if (scale.is_ready()) {
-    float reading = scale.get_units(10);  // Average of 10 readings
+    float reading = scale.get_units(10);
     if (reading < 0) {
-      reading = 0.0;  // Don't return negative weights
+      reading = 0.0;
     }
     return reading;
   } else {
-    Serial.println("HX711 not found.");
     return 0.0;
   }
 }
