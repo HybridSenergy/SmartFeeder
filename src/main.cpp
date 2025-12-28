@@ -1,22 +1,17 @@
 /*
  * ESP32 Smart Feeder
  * IoT-enabled smart pet feeder with stepper motor control, 
- * load cell weight measurement, and MQTT communication
+ * load cell weight measurement, and web server for remote control
  */
 
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <WebServer.h>
 #include <AccelStepper.h>
 #include <HX711.h>
 
 // WiFi Configuration
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-
-// MQTT Configuration
-const char* mqtt_server = "192.168.1.100";  // Change to your MQTT broker IP
-const char* mqtt_topic_command = "kennel/feeder/1/command";
-const char* mqtt_topic_weight = "kennel/feeder/1/weight";
+const char* ssid = "Casa da Opera";
+const char* password = "naovoudizer";
 
 // Pin Definitions
 #define STEP_PIN 2      // A4988 STEP pin
@@ -40,18 +35,19 @@ HX711 scale;
 // Stepper Motor Object
 AccelStepper stepper(MOTOR_INTERFACE_TYPE, STEP_PIN, DIR_PIN);
 
-// WiFi and MQTT Clients
-WiFiClient espClient;
-PubSubClient client(espClient);
+// Web Server
+WebServer server(80);
 
 // Timing Variables
-unsigned long lastWeightPublish = 0;
-const unsigned long weightPublishInterval = 30000;  // 30 seconds
+unsigned long lastWeightDisplay = 0;
+const unsigned long weightDisplayInterval = 30000;  // 30 seconds
 
 // Function Prototypes
 void setupWiFi();
-void reconnectMQTT();
-void callback(char* topic, byte* payload, unsigned int length);
+void handleRoot();
+void handleDispense();
+void handleWeight();
+void handleNotFound();
 void dispenseFood();
 float getWeight();
 
@@ -78,36 +74,31 @@ void setup() {
   // Connect to WiFi
   setupWiFi();
   
-  // Setup MQTT
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
+  // Setup Web Server Routes
+  server.on("/", handleRoot);
+  server.on("/dispense", handleDispense);
+  server.on("/weight", handleWeight);
+  server.onNotFound(handleNotFound);
+  
+  server.begin();
+  Serial.println("Web server started!");
+  Serial.print("Access the feeder at: http://");
+  Serial.println(WiFi.localIP());
   
   Serial.println("Setup complete!");
 }
 
 void loop() {
-  // Maintain MQTT connection
-  if (!client.connected()) {
-    reconnectMQTT();
-  }
-  client.loop();
+  server.handleClient();
   
-  // Publish weight every 30 seconds
+  // Display weight every 30 seconds
   unsigned long currentMillis = millis();
-  if (currentMillis - lastWeightPublish >= weightPublishInterval) {
+  if (currentMillis - lastWeightDisplay >= weightDisplayInterval) {
     float weight = getWeight();
-    char weightStr[20];
-    dtostrf(weight, 4, 2, weightStr);
-    
-    if (client.publish(mqtt_topic_weight, weightStr)) {
-      Serial.print("Weight published: ");
-      Serial.print(weightStr);
-      Serial.println(" g");
-    } else {
-      Serial.println("Failed to publish weight");
-    }
-    
-    lastWeightPublish = currentMillis;
+    Serial.print("Current weight: ");
+    Serial.print(weight);
+    Serial.println(" g");
+    lastWeightDisplay = currentMillis;
   }
   
   // Run stepper motor if needed
@@ -141,48 +132,67 @@ void setupWiFi() {
   }
 }
 
-void reconnectMQTT() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    
-    // Attempt to connect
-    if (client.connect("ESP32SmartFeeder")) {
-      Serial.println("connected!");
-      
-      // Subscribe to command topic
-      client.subscribe(mqtt_topic_command);
-      Serial.print("Subscribed to: ");
-      Serial.println(mqtt_topic_command);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
+void handleRoot() {
+  float weight = getWeight();
+  int irStatus = digitalRead(IR_SENSOR_PIN);
+  String irStatusText = (irStatus == LOW) ? "OBSTRUCTION DETECTED" : "Clear";
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>ESP32 Smart Feeder</title>";
+  html += "<style>";
+  html += "body { font-family: Arial; text-align: center; background: #f0f0f0; padding: 20px; }";
+  html += ".container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }";
+  html += "h1 { color: #333; }";
+  html += ".status { margin: 20px 0; padding: 15px; background: #e8f5e9; border-radius: 5px; }";
+  html += ".status.obstruction { background: #ffebee; }";
+  html += "button { background: #4CAF50; color: white; padding: 15px 30px; font-size: 18px; border: none; border-radius: 5px; cursor: pointer; margin: 10px; }";
+  html += "button:hover { background: #45a049; }";
+  html += "button:disabled { background: #cccccc; cursor: not-allowed; }";
+  html += ".weight { font-size: 24px; color: #2196F3; font-weight: bold; margin: 20px 0; }";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<h1>🐾 ESP32 Smart Feeder</h1>";
+  html += "<div class='weight'>Current Weight: " + String(weight, 2) + " g</div>";
+  html += "<div class='status " + String((irStatus == LOW) ? "obstruction" : "") + "'>";
+  html += "IR Sensor: " + irStatusText + "</div>";
+  html += "<button onclick='dispenseFood()' " + String((irStatus == LOW) ? "disabled" : "") + ">Dispense Food</button>";
+  html += "<button onclick='updateWeight()'>Refresh Weight</button>";
+  html += "<script>";
+  html += "function dispenseFood() {";
+  html += "  fetch('/dispense').then(r => r.text()).then(data => {";
+  html += "    alert(data);";
+  html += "    setTimeout(() => location.reload(), 2000);";
+  html += "  });";
+  html += "}";
+  html += "function updateWeight() {";
+  html += "  fetch('/weight').then(r => r.text()).then(data => {";
+  html += "    document.querySelector('.weight').innerHTML = 'Current Weight: ' + data + ' g';";
+  html += "  });";
+  html += "}";
+  html += "setInterval(updateWeight, 30000);";  // Auto-refresh every 30 seconds
+  html += "</script>";
+  html += "</div></body></html>";
+  
+  server.send(200, "text/html", html);
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  // Convert payload to string
-  char message[length + 1];
-  for (int i = 0; i < length; i++) {
-    message[i] = (char)payload[i];
-  }
-  message[length] = '\0';
+void handleDispense() {
+  Serial.println("Dispense command received via web");
+  dispenseFood();
   
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("]: ");
-  Serial.println(message);
-  
-  // Check if it's a dispense command
-  if (strcmp(topic, mqtt_topic_command) == 0) {
-    if (strcmp(message, "dispense") == 0) {
-      Serial.println("Dispense command received");
-      dispenseFood();
-    }
-  }
+  float weight = getWeight();
+  String response = "Food dispensed! Current weight: " + String(weight, 2) + " g";
+  server.send(200, "text/plain", response);
+}
+
+void handleWeight() {
+  float weight = getWeight();
+  server.send(200, "text/plain", String(weight, 2));
+}
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
 }
 
 void dispenseFood() {
@@ -214,12 +224,8 @@ void dispenseFood() {
   
   Serial.println("Food dispensing complete!");
   
-  // Publish updated weight after dispensing
-  delay(1000);  // Wait for food to settle
-  float weight = getWeight();
-  char weightStr[20];
-  dtostrf(weight, 4, 2, weightStr);
-  client.publish(mqtt_topic_weight, weightStr);
+  // Wait for food to settle before next reading
+  delay(1000);
 }
 
 float getWeight() {
